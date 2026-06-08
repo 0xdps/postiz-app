@@ -1,0 +1,27 @@
+.github/workflows/build-containers.yml
+  s_d67351ecaef5e7::t_2bd2f1f67cbace 2,7-8,11-19,21-23,25-30,32,35-45,47,52-63,67-68,71,73-97,99-100,102-118,120-128,130-137,140,142,144-210,212-223
+SELFHOSTING.md
+  s_d67351ecaef5e7::t_9cb22bd249c1a1 1-769,819-1028
+  s_d67351ecaef5e7::t_5f2073dedad148 770-818
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.3",
+  "base_commit_sha": "504a5efd026b56649afb3c3efd7459d2ac895c28",
+  "prompts": {},
+  "humans": {
+    "h_7a2f4c8f0473b8": {
+      "author": "Devendra Pratap Singh <dps.manit@gmail.com>"
+    }
+  },
+  "sessions": {
+    "s_d67351ecaef5e7": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "a43120e3-088f-4676-be06-abad00f05904",
+        "model": "gpt-5-mini"
+      },
+      "human_author": "Devendra Pratap Singh <dps.manit@gmail.com>"
+    }
+  }
+}
