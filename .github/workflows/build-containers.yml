@@ -1,102 +1,226 @@
 ---
-name: "Build Containers"
+name: "Build & Push Docker Image"
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - main
     tags:
       - '*'
+  pull_request:
+    paths:
+      - 'Dockerfile.dev'
+      - 'docker-compose.yaml'
+      - 'apps/**'
+      - 'libraries/**'
+      - 'package.json'
+      - 'pnpm-lock.yaml'
+      - 'var/docker/**'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  build-containers-common:
-    runs-on: ubuntu-latest
-    outputs:
-      containerver: ${{ steps.getcontainerver.outputs.containerver }}
-    steps:
-      - name: Get Container Version
-        id: getcontainerver
-        run: |
-          echo "containerver=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-
-  build-containers:
-    needs: build-containers-common
+  # ─────────────────────────────────────────────
+  # Build & Push Multi-Arch Container Images
+  # ─────────────────────────────────────────────
+  build:
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - runnertags: ubuntu-latest
-            arch: amd64
-          - runnertags: ubuntu-24.04-arm
-            arch: arm64
-    runs-on: ${{ matrix.runnertags }}
+          - os: ubuntu-latest
+            platform: linux/amd64
+          - os: ubuntu-24.04-arm
+            platform: linux/arm64
+
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - name: Extract version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "VERSION=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "VERSION=dev-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Login to ghcr
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ github.token }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and Push Image
-        env:
-          CONTAINERVER: ${{ needs.build-containers-common.outputs.containerver }}
-          NEXT_PUBLIC_VERSION: ${{ github.ref_name }}
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=dev-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dev
+          platforms: ${{ matrix.platform }}
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            NEXT_PUBLIC_VERSION=${{ steps.version.outputs.VERSION }}
+          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
         run: |
-          docker buildx build --platform linux/${{ matrix.arch }} \
-            -f Dockerfile.dev \
-            -t ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-${{ matrix.arch }} \
-            --build-arg NEXT_PUBLIC_VERSION=${{ env.NEXT_PUBLIC_VERSION }} \
-            --pull \
-            --no-cache \
-            --provenance=false --sbom=false \
-            --output "type=registry,name=ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-${{ matrix.arch }}" .
+          mkdir -p ${{ runner.temp }}/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
 
-  build-container-manifest:
-    needs: [build-containers, build-containers-common]
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.platform == 'linux/amd64' && 'amd64' || 'arm64' }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ─────────────────────────────────────────────
+  # Merge digests and push multi-arch manifest
+  # ─────────────────────────────────────────────
+  merge:
     runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name != 'pull_request'
+
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
+
     steps:
-      - name: Login to ghcr
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
+          registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
-          password: ${{ github.token }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create Docker Manifest
-        env:
-          CONTAINERVER: ${{ needs.build-containers-common.outputs.containerver }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=dev-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
         run: |
-          # Verify the architecture images
-          echo "Verifying AMD64 image:"
-          docker buildx imagetools inspect ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-amd64
-          
-          echo "Verifying ARM64 image:"
-          docker buildx imagetools inspect ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-arm64
-          
-          # Try to remove any existing manifests first
-          docker manifest rm ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }} || true
-          docker manifest rm ghcr.io/gitroomhq/postiz-app:latest || true
-          
-          # Create and push the version-specific manifest
-          docker manifest create ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }} \
-            --amend ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-amd64 \
-            --amend ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-arm64
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
-          docker manifest push ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
 
-          # Create and push the latest manifest
-          docker manifest create ghcr.io/gitroomhq/postiz-app:latest \
-            --amend ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-amd64 \
-            --amend ghcr.io/gitroomhq/postiz-app:${{ env.CONTAINERVER }}-arm64
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
 
-          docker manifest push ghcr.io/gitroomhq/postiz-app:latest
+  # ─────────────────────────────────────────────
+  # Scan the final image for vulnerabilities
+  # ─────────────────────────────────────────────
+  scan:
+    runs-on: ubuntu-latest
+    needs: merge
+    if: github.event_name != 'pull_request'
+
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+    steps:
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  # ─────────────────────────────────────────────
+  # Build summary
+  # ─────────────────────────────────────────────
+  summary:
+    runs-on: ubuntu-latest
+    needs: [build, merge]
+    if: always()
+
+    steps:
+      - name: Build summary
+        run: |
+          echo "## 🐳 Docker Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Job | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Build (amd64) | ${{ needs.build.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Build (arm64) | ${{ needs.build.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Merge Manifest | ${{ needs.merge.result == 'success' && '✅' || '❌' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}\`" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "**Tag:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Verify Manifest
         run: |
