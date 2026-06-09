@@ -1,0 +1,20 @@
+.github/workflows/build-containers.yml
+  s_9d80f2a8988a94::t_78c5cd1ceb7859 158,163-164
+  s_9d80f2a8988a94::t_0175962438d4bd 174
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.6",
+  "base_commit_sha": "9fe00cc5dec9cc3f36c4e167e43acfc1e648e6b0",
+  "prompts": {},
+  "sessions": {
+    "s_9d80f2a8988a94": {
+      "agent_id": {
+        "tool": "github-copilot",
+        "id": "7ba7cc98-419a-4d72-bd36-fc56de8fb2aa",
+        "model": "gpt-5-mini"
+      },
+      "human_author": "Devendra Pratap Singh <dps.manit@gmail.com>"
+    }
+  }
+}
